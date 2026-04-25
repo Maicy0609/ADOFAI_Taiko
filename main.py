@@ -125,6 +125,7 @@ def main():
         'bgm_enabled': False,
         'bgm_path': '',
         'fixed_speed': False,
+        'min_note_interval': 0.0,
     }
 
     while True:
@@ -142,6 +143,9 @@ def main():
         print(f'  [B] 背景音乐       : {bgm_status}')
         speed_mode = '固定速度' if params['fixed_speed'] else '随BPM变速'
         print(f'  [S] 速度模式       : {speed_mode}')
+        if params['fixed_speed']:
+            min_interval_str = f'{params["min_note_interval"]:.0f} px' if params['min_note_interval'] > 0 else '关闭'
+            print(f'  [M] 最小音符间隔   : {min_interval_str}  (仅固定速度模式)')
         print()
         print('  [0] 开始生成视频')
         print('  [Q] 退出')
@@ -205,6 +209,19 @@ def main():
             params['fixed_speed'] = not params['fixed_speed']
             mode = '固定速度' if params['fixed_speed'] else '随BPM变速'
             print(f'  速度模式已切换为: {mode}')
+            if not params['fixed_speed']:
+                params['min_note_interval'] = 0.0
+            input('按回车继续...')
+        elif choice == 'm':
+            if params['fixed_speed']:
+                val = input_float('   最小音符间隔 (px, 0=关闭): ', params['min_note_interval'])
+                params['min_note_interval'] = max(0.0, val)
+                if params['min_note_interval'] > 0:
+                    print(f'  最小音符间隔已设为: {params["min_note_interval"]:.0f} px')
+                else:
+                    print('  最小音符间隔已关闭')
+            else:
+                print('  ⚠️  此选项仅在固定速度模式下可用')
             input('按回车继续...')
         else:
             print('⚠️  无效选项')
@@ -222,7 +239,8 @@ def main():
             track_height=params['track_height'],
             use_gpu=True,
             bgm_path=params['bgm_path'] if params['bgm_enabled'] else None,
-            fixed_speed=params['fixed_speed'],  # 新增参数
+            fixed_speed=params['fixed_speed'],
+            min_note_interval=params['min_note_interval'],
         )
         gen.generate_video(output_path)
     except Exception as e:

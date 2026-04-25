@@ -140,8 +140,12 @@ class TaikoAdofaiGenerator:
                  track_height: int = 160,
                  use_gpu: bool = True,
                  bgm_path: str = None,
-                 fixed_speed: bool = False):
+                 fixed_speed: bool = False,
+                 min_note_interval: float = 0.0):
         self.fixed_speed = fixed_speed
+        self.min_note_interval = min_note_interval
+        # 当固定速度模式启用最小音符间隔时，需要变速，内部转为非固定速度模式
+        self._use_min_interval = fixed_speed and min_note_interval > 0
         self.tiles, self.offset_ms = load_adofai_tiles(adofai_path)
         self.base_speed = base_speed
         self.speed_mult = speed_mult
@@ -171,14 +175,22 @@ class TaikoAdofaiGenerator:
         print(f'⚙️  预计算滚动数据 ({n_notes} 个音符)...')
 
         with tqdm(total=3, desc='   预计算', bar_format='{desc} |{bar}| {n_fmt}/{total_fmt} 步') as pbar:
-            # 步骤1: 构建去重速度段 —— 只在BPM变化时才建断点
+            # 步骤1: 构建速度段
             pbar.set_postfix_str('构建速度段')
-            self.speed_segments = self._build_dedup_speed_segments()
+            if self._use_min_interval:
+                # 最小音符间隔模式：内部使用非固定速度，用虚拟BPM实现变速
+                saved_fixed = self.fixed_speed
+                self.fixed_speed = False
+                self.speed_segments = self._build_min_interval_segments()
+            else:
+                self.speed_segments = self._build_dedup_speed_segments()
             pbar.update(1)
 
-            # 步骤2: 构建距离函数 —— 断点数从997K降到可能几百
+            # 步骤2: 构建距离函数
             pbar.set_postfix_str('距离函数')
             self._build_global_distance_function()
+            if self._use_min_interval:
+                self.fixed_speed = saved_fixed
             pbar.update(1)
 
             # 步骤3: 向量化批量计算所有音符位置 —— 一次numpy批处理替代逐个50轮二分
@@ -205,6 +217,39 @@ class TaikoAdofaiGenerator:
             if bpm != prev_bpm:
                 segments.append((note.offset, bpm))
                 prev_bpm = bpm
+        return segments
+
+    def _build_min_interval_segments(self) -> List[Tuple[float, float]]:
+        """
+        [最小音符间隔] 在固定速度模式下，为距离过近的音符对构建变速段。
+
+        原理：
+          固定速度下，相邻音符的屏幕间距 = dt × base_vel。
+          若该间距 < min_note_interval，则在两个音符之间临时加速滚动，
+          使屏幕间距恰好等于 min_note_interval，加速后回到原速度。
+
+        实现方式：
+          内部切换为非固定速度模式，用"虚拟BPM"编码所需速度，
+          使得 _velocity(bpm) 能返回正确的变速值。
+        """
+        base_vel = self.base_speed * self.speed_mult
+        base_bpm = CONFIG['base_bpm']
+        virtual_base_bpm = base_bpm  # _velocity(base_bpm) = base_vel
+
+        segments: List[Tuple[float, float]] = [(0.0, virtual_base_bpm)]
+
+        for i in range(len(self.notes) - 1):
+            dt = self.notes[i + 1].offset - self.notes[i].offset
+            if dt > 0:
+                normal_dist = dt * base_vel
+                if normal_dist < self.min_note_interval:
+                    needed_vel = self.min_note_interval / dt
+                    virtual_bpm = base_bpm * needed_vel / base_vel
+                    # 在当前音符处加速
+                    segments.append((self.notes[i].offset, virtual_bpm))
+                    # 在下一个音符处回到原速度
+                    segments.append((self.notes[i + 1].offset, virtual_base_bpm))
+
         return segments
 
     # ── 向量化计算方法 ─────────────────────────
@@ -352,11 +397,17 @@ class TaikoAdofaiGenerator:
         # 每帧只算1次全局距离
         dist_t = self._distance_at_time(t)
 
+        last_x = None
         for i in range(right_idx, left_idx):
             x = self.width - (dist_t - self._nd_dist_at_appear[i])
             if x + self.note_radius < 0 or x - self.note_radius > self.width:
                 continue
-            center = (int(x), center_y)
+            ix = int(x)
+            # 跳过完全重叠的音符（屏幕坐标差为 0px）
+            if last_x is not None and ix == last_x:
+                continue
+            last_x = ix
+            center = (ix, center_y)
             cv2.circle(img, center, self.note_radius + 3, (255, 255, 255), -1)
             cv2.circle(img, center, self.note_radius, (0, 0, 255), -1)
         return img
